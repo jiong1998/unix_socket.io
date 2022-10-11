@@ -1,6 +1,3 @@
-# unix_socket.io
-unix网络编程卷1:个人源码+个人笔记
-
 # Unix网络编程
 在unix网络编程笔记中，大部分计算机网络的知识将被略过，默认大家有相应的前置基础。
 
@@ -232,6 +229,129 @@ while(1)
   	发送数据---write或者send
   }
 5. 关闭文件描述符----close(sockfd);
+
+### 5.4 服务器-客户端通信代码案例
+
+需求：客户端连接服务器后，客户端将内容传输到服务器端，服务器输出客户端的内容，并将客户端的内容改成大写并传输回客户端，客户端输出服务器的传输的内容。
+
+**服务器：**
+```cpp
+//第一章：服务器程序
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ctype.h>//大小写转换
+#include "unp.h"
+
+int main()
+{
+    int listenfd= Socket(AF_INET,SOCK_STREAM,0);
+    //初始化套接字
+    struct sockaddr_in seraddr;
+    bzero(&seraddr, sizeof(seraddr));
+    seraddr.sin_family=AF_INET;
+    seraddr.sin_port= htons(8888);//随意指定端口号
+
+//    seraddr.sin_addr.s_addr= htonl(INADDR_ANY);
+    Bind(listenfd, (struct sockaddr*) &seraddr, sizeof(seraddr));//将套接字和文件描述符绑定
+    Listen(listenfd, 128);
+
+    //-----获取客户端的地址信息
+    struct sockaddr_in cliaddr;
+    socklen_t len= sizeof(cliaddr);//len是值-结果参数
+    char IP[16];
+    memset(IP,0x00,sizeof(IP));
+    //----------
+
+    int connfd= Accept(listenfd, (struct sockaddr *)&cliaddr, &len);//阻塞函数
+    printf("IP=[%s], port=[%d]\n", inet_ntop(AF_INET,&cliaddr.sin_addr.s_addr,IP, sizeof(IP)), ntohs(cliaddr.sin_port));//打印客户端的地址
+
+    printf("listenfd=[%d], connfd=[%d]\n", listenfd, connfd);
+    int i=0;
+    int n=0;
+    char buf[1024];
+    while(1)
+    {
+        //先听后发
+
+        memset(buf, 0x00, sizeof(buf));
+        //从客户端上读数据
+        n=read(connfd, buf, sizeof(buf));//如果缓冲区没有数据就阻塞
+        if(n<=0)
+        {
+            printf("read error or client close, n==[%d] \n", n);
+            break;
+        }
+        printf("server: n = [%d], [%s] \n", n, buf);
+        for(i=0;i<n;++i)
+        {
+            buf[i]= toupper(buf[i]);
+        }
+        write(connfd, &buf, n);
+    }
+    close(connfd);
+    close(listenfd);
+}
+
+
+```
+**客户端：**
+```cpp
+//第一章：客户端程序
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ctype.h>//大小写转换
+#include <sys/uio.h>
+#include <unistd.h>
+#include "unp.h"
+
+int main()
+{
+    //创建socket
+    int sockfd=Socket(AF_INET,SOCK_STREAM,0);
+    struct sockaddr_in servaddr;
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family=AF_INET;
+    servaddr.sin_port= htons(8888);
+    inet_pton(AF_INET,"192.168.1.213", &servaddr.sin_addr.s_addr);
+    int ret = connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr));
+    if(ret<0)
+    {
+        perror("connect error");
+        return -1;
+    }
+    char buf[1024];
+    int n;
+    printf("连接成功，开始通信！\n");
+    while(1)
+    {
+        //读标准输入数据
+        memset(buf,0x00, sizeof(buf));
+        n = read(STDIN_FILENO,buf,sizeof(buf));
+        //发送数据
+        write(sockfd, buf, n);
+
+        //接收数据
+        memset(buf,0x00, sizeof(buf));
+        n = read(sockfd, buf, sizeof(buf));
+        if( n <=0)
+        {
+            printf("read error or server closed, n==[%d] \n", n);
+            break;
+        }
+        printf("client: n = [%d], [%s] \n", n, buf);
+    }
+    close(sockfd);
+    return 0;
+}
+```
 
 
 
