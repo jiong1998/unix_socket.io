@@ -1,3 +1,4 @@
+
 # Unix网络编程
 在unix网络编程笔记中，大部分计算机网络的知识将被略过，默认大家有相应的前置基础。
 
@@ -1089,6 +1090,8 @@ struct pollfd
 
 若timeout=0, poll函数不阻塞,且没有事件发生, 此时返回-1, 并且errno=EAGAIN, 这种情况不应视为错误.
 
+EAGAIN：如果你连续做read（read的文件描述符已经设置为非阻塞情况）操作而没有数据可读。此时程序不会阻塞起来等待数据准备就绪返回，read函数会返回一个错误EAGAIN，提示你的应用程序现在没有数据可读请稍后再试。
+
 poll总结：
 1. 当poll函数返回的时候, 结构体当中的fd和events没有发生变化, **究竟有没有事件发生由revents来判断**, 所以poll是请求和返回分离.
 2. struct pollfd结构体中的fd成员若赋值为-1, 则poll不会监控.
@@ -1426,10 +1429,10 @@ int main()
 ### 2.5 epoll的LT和ET模式
 epoll的两种模式LT和ET模式
 - LT(水平触发): 高电平代表1
-	- 只要缓冲区中有数据, epoll_wait就一直通知
+	- 以读事件为例，当缓冲区有数据准备好的时候，此时会触发读事件，如果我们一直不去读取缓冲区里的数据，epoll模型就会一直通知我们有事件就绪，即epoll_wait中的events参数就会一直包含某个文件描述符的读事件。
 
 - ET(边缘触发): 电平有变化就代表1
-	- 缓冲区中有数据epoll_wait只会通知一次, 之后再有数据epoll_wait才会通知.(若是读数据的时候没有读完, 则剩余的数据不会再通知, 直到有新的数据到来)
+	- ET模式与LT模式相反，当缓冲区就数据准备好的时候，也会触发读事件，但是只会触发一次，如果我们这次没有调用read/recv读取 或者 没有一次读完，后面就不会通知有读事件就绪了。简单来说，只有当缓冲区里的数据量发生变化的时候，才会通知我们一次，不会像LT模式那样一直通知。换句话说：**只有当I/O状态改变时，才触发事件，每次触发一次性把数据全部处理完，因为下一次处理要等I/O状态再次改变才可以(触发就全部处理完数据)**
 	
 具体来说：
 - epoll默认情况下是LT模式, 在这种模式下, 若读数据一次性没有读完, 缓冲区中还有可读数据, 则epoll_wait还会再次通知
@@ -1443,13 +1446,14 @@ ev.data.fd = connfd;
 epoll_ctl(epfd, EPOLL_CTL_ADD, connfd, &ev);
 ```
 ### 2.6 epoll的ET模式的read非阻塞形式
+为什么ET模式下read要设置成非阻塞形式：
+假设客户端给服务端发送了一个大小为100K byte的数据，读事件就绪，epoll模型通知你一次，但是服务端一次没有读完，还剩余50K在缓冲区里。等到下一次调用epoll_wait的时候，由于epoll是ET模式，已经通知过你一次，这次就不认为sock有读事件就绪，epoll_wait 也就不会返回该文件描述符上读事件就绪的信息。
 
+因此，我们需要在epoll_wait返回一次的情况下读完数据，所以我们需要使用循环while(1)。而使用循环读数据, 直到读完数据之后会阻塞，所以要将将通信文件描述符设置为非阻塞模式
 
-在ET模式下, 如何在epoll_wait返回一次的情况下读完数据?
-&emsp;&emsp;循环读数据, 直到读完数据, 但是读完数据之后会阻塞.
-
-若能够一次性读完还需要设置什么? 
-&emsp;&emsp;将通信文件描述符设置为非阻塞模式
+**使用ET模式的两个要求**：
+- 要求一：**必须要一次读完/写入所有的数据**。因为ET模式只会通知一次，下一次读取只能是缓冲区接收到了新的数据。
+- 要求二：**必须设为非阻塞模式**。循环读取的时候，如果缓冲区没有数据或者低于水位线，recv/read就会阻塞等待读事件就绪，这会影响到epoll模型中其他文件描述符的操作。
 
 具体代码案例移步至：https://github.com/jiong1998/unix_socket.io/issues/8
 
@@ -1597,7 +1601,7 @@ int main()
 }
 ```
 
-## 3. udp客户端开发代码
+## 4. udp客户端开发代码
 ```cpp
 //第五章：udp开发客户端代码
 #include <stdio.h>
@@ -1647,3 +1651,501 @@ int main()
     return 0;
 }
 ```
+## 5. 本地socket通信
+通过socket函数创建本地套接字
+函数参数填写:	
+- domain: AF_UNIX or AF_LOCAL
+- type: SOCK_STREAM或者SOCK_DGRAM
+- protocol: 0 表示使用默认协议
+
+创建socket成功以后, 会在内核创建缓冲区, 下图是客户端和服务端内核缓冲区示意图.
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/e004b93f64a846b18356803b8c6fd3f1.png)
+通过bind绑定本地套接字
+- socket: 由socket函数返回的文件描述符
+- addr: 本地地址
+- addlen: 本地地址长度
+- 相关结构体：
+struct sockaddr_un {
+    sa_family_t sun_family;  /* AF_UNIX or AF_LOCAL*/
+    char sun_path[108];  //文件路径
+};
+![在这里插入图片描述](https://img-blog.csdnimg.cn/783d14d517394a96b4c0f59bc8b063a6.png)
+
+需要注意的是: **bind函数会自动创建socket文件**, 若在调用bind函数之前socket文件已经存在, 则调用bind会报错, 可以使用unlink函数在bind之前先删除文件.
+
+代码和之前服务器-客户端开发差不多（但是在本地通信中，客户端要绑定自己的.sock文件，不然服务器不知道你是谁），就不放上来了。
+
+# 第七章 libevent
+libevent的核心实现:
+&emsp;&emsp;在linux上, 其实质就是epoll反应堆.
+&emsp;&emsp;libevent是事件驱动, epoll反应堆也是事件驱动, 当要监测的事件发生的时候, 就会调用事件对应的回调函数, 执行相应操作. 特别提醒: 事件回调函数是由用户开发的, 但是不是由用户显示去调用的, 而是由libevent去调用的.
+
+## 1.安装
+按照教程安装，安装完后会提示：
+error while loading shared libraries: libevent-2.0.so.5
+
+原因是：默认情况下，系统只会使用/lib和/usr/lib这两个目录下的库文件，通常通过源码包进行安装时，如果没有指定，会将库安装在/usr/local/lib目录下当运行程序需要链接动态库时，提示找不到相关的.so库，会提示报错。那么就需要将不在默认库目录中的目录添加到配置文件中去。
+
+解决办法：
+1.打开/etc/ld.so.conf配置文件
+&emsp;&emsp;vim /etc/ld.so.conf
+2.添加库文件所在的目录
+&emsp;&emsp;/usr/local/lib
+3.保存修改后，执行：/sbin/ldconfig -v
+&emsp;&emsp;其作用是将文件/etc/ld.so.conf列出的路径下的库文件缓存到/etc/ld.so.cache以供使用，因此当安装完一些库文件，或者修改/etc/ld.so.conf增加了库的新搜索路径，需要运行一下ldconfig，使所有的库文件都被缓存到文件/etc/ld.so.cache中，如果没做，可能会找不到刚安装的库。
+
+&emsp;&emsp;如果进行这几步处理后，出现了error while loading shared libraries:...：permission denied
+需要确认一下是不是当前用户在库目录下是不是没有可读的权限。
+将提示中显示的文件权限进行修改，添加可读权限，随后报错解除
+
+使用方法：
+gcc -o hello-world hello-world.c -levent
+## 2. libevent的地基-event_base
+使用libevent 函数之前需要分配一个或者多个 event_base 结构体, 每个event_base结构体持有一个事件集合, 可以检测以确定哪个事件是激活的, event_base结构相当于epoll红黑树的树根节点, 每个event_base都有一种用于检测某种事件已经就绪的 “方法”(回调函数)
+
+通常情况下可以通过event_base_new函数获得event_base结构。
+
+### 2.1 event_base----创建地基
+相关函数说明:
+1 struct event_base *event_base_new(void);    //event.h的L:337
+- 函数说明: 获得event_base结构
+- 参数说明: 无
+- 返回值: 
+	- 成功返回event_base结构体指针;
+	- 失败返回NULL;
+
+### 2.2 event_free----释放地基
+2 void event_base_free(struct event_base *);   //event.h的L:561
+- 函数说明: 释放event_base指针
+
+### 2.3 event_reinit----子进程调用地基
+3 int event_reinit(struct event_base *base);  //event.h的L:349
+- 函数说明: **如果有子进程,** 且子进程也要使用base, 则子进程需要对event_base重新初始化, 此时需要调用event_reinit函数.
+- 函数参数: 由event_base_new返回的执行event_base结构的指针
+- 返回值: 成功返回0, 失败返回-1
+
+对于不同系统而言, event_base就是调用不同的多路IO接口去判断事件是否已经被激活, 对于linux系统而言, 核心调用的就是epoll, 同时支持poll和select.
+
+### 2.4 看libevent支持的后端的方法
+查看libevent支持的后端的方法有哪些:
+const char \**event_get_supported_methods(void);
+- 函数说明: 获得当前系统(或者称为平台)支持的方法有哪些
+- 参数: 无
+- 返回值: 返回二维数组, 类似与main函数的第二个参数**argv.
+
+const char * event_base_get_method(const struct event_base *base);
+- 函数说明: 获得当前base节点使用的多路io方法
+- 函数参数: event_base结构的base指针.
+- 返回值: 获得当前base节点使用的多路io方法的指针
+
+## 3. 事件的构建与使用
+### 3.1 event_new函数----创建event事件
+某个事件所对应的回调函数：
+typedef void (*event_callback_fn)(evutil_socket_t fd, short events, void *arg);
+注意: 回调函数的参数就对应于event_new函数的fd, event和arg
+
+struct event *event_new(struct event_base *base, evutil_socket_t fd, short events, event_callback_fn cb, void *arg);
+
+- 函数说明: event_new负责创建event结构指针, 同时指定对应的地基base, 		  还有对应的文件描述符, 事件, 以及回调函数和回调函数的参数。
+- 参数说明：
+	- base: 对应的根节点--地基
+	- fd: 要监听的文件描述符
+	- events:要监听的事件
+		- EV_READ  读事件
+		- EV_WRITE  写事件
+		- EV_SIGNAL  信号事件
+		- EV_PERSIST  周期性触发
+		- 若设置持续的读事件：EV_READ | EV_PERSIST
+
+### 3.2 event_add函数----将事件上树
+int event_add(struct event *ev, const struct timeval *timeout);
+- 函数说明: 将非未决态事件转为未决态, 相当于调用epoll_ctl函数(EPOLL_CTL_ADD), 开始监听事件是否产生, 相当于epoll的上树操作.
+- 参数说明：
+	- ev: 调用event_new创建的事件
+	- timeout: 限时等待事件的产生, 也可以设置为NULL, 没有限时。
+
+### 3.3 event_del函数----将事件下树
+int event_del(struct event *ev);
+- 函数说明: 将事件从未决态变为非未决态, 相当于epoll的下树（epoll_ctl调用EPOLL_CTL_DEL操作）操作。
+- 参数说明: ev指的是由event_new创建的事件.
+
+### 3.4 event_free函数----释放事件节点
+void event_free(struct event *ev);
+- 函数说明: 释放由event_new申请的event节点。
+## 4. 等待事件产生-循环等待event_loop		
+&emsp;&emsp;libevent在地基打好之后, 需要等待事件的产生, 也就是等待事件被激活, 所以程序不能退出, 对于epoll来说, 我们需要自己控制循环, 而在libevent中也给我们提供了API接口, 类似where(1)的功能. 
+
+
+
+### 4.1 event_base_dispatch----创建循环
+int event_base_dispatch(struct event_base *base);   //event.h的L:364
+- 函数说明: 进入循环等待事件
+- 参数说明:由event_base_new函数返回的指向event_base结构的指针
+- 调用该函数, 程序将会一直运行, 直到没有需要检测的事件了, 或者被结束循环的API终止。
+
+### 4.2 event_base_loopexit/loopbreak----结束循环
+
+struct timeval {
+	long    tv_sec;                    
+	long    tv_usec;            
+};//设置时间
+
+int event_base_loopexit(struct event_base *base, const struct timeval *tv);
+
+int event_base_loopbreak(struct event_base *base);
+
+两个函数的区别是如果正在执行激活事件的回调函数, 那么**event_base_loopexit将在事件回调执行结束后终止循环**（如果tv时间非NULL, 那么将等待tv设置的时间后立即结束循环，而**event_base_loopbreak会立即终止循环**。
+
+
+
+
+
+
+## 5. 使用libevent库的步骤
+1. 创建根节点--event_base_new
+2. **设置监听事件和数据可读可写的事件的回调函数**
+设置了事件对应的回调函数以后, 当事件产生的时候会自动调用回调函数
+3. 事件循环--event_base_dispatch
+相当于while(1), 在循环内部等待事件的发生,  若有事件发生则会触发事件对应的回调函数。
+4. 释放根节点--event_base_free
+  释放由event_base_new和event_new创建的资源, 分别调用event_base_free和event_free函数.
+
+## 6. 基于libevent实现tcp服务器流程
+```cpp
+1 创建socket---socket()
+2 设置端口复用---setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int))
+3 绑定--bind()
+4 设置监听--listen()
+5 创建地基
+	struct event_base *base = event_base_new()
+6 创建lfd对应的事件
+	struct event *ev = event_new(base, lfd, EV_READ|EV_PERSIST, conncb, base);
+7 上event_base地基
+	event_add(ev, NULL);
+8 进入事件循环
+	event_base_dispatch(base);
+	
+9 释放资源
+	event_base_free(base);
+	event_free(ev);
+	
+//编写回调函数：
+//typedef void (*event_callback_fn)(evutil_socket_t fd, short events, void *arg);
+//监听文件描述符对应的事件回调函数
+void conncb(evutil_socket_t fd, short events, void *arg)
+{
+	struct event_base *base = (struct event_base *)arg;
+	//接受新的连接
+	int cfd = accept(fd, NULL, NULL);
+	if(cfd>0)
+	{
+		//创建一个新的事件
+		struct event *ev = event_new(base, cfd, EV_READ|EV_PERSIST, readcb, NULL);
+		event_add(ev, NULL);
+	}
+}
+
+//读客户端数据对应的回调函数
+void readcb(evutil_socket_t fd, short events, void *arg)
+{	
+	//读数据
+	n = read(fd, buf, sizeof(buf));
+	if(n<=0)
+	{
+		//从base地基上删除该事件
+		close(fd);
+		event_del(ev);
+		event_free(ev);
+	}
+	//发送数据给对方
+	write(fd, buf, n);
+}
+```
+
+## 7.基于libevent实现tcp服务器代码
+```cpp
+//第六章：基于libevent实现tcp服务器
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ctype.h>//大小写转换
+#include <fcntl.h>
+#include <event2/event.h>
+#include <unistd.h>
+
+//利用结构体数组存储connfd和对应的event
+struct Ev_Connfd_Struct
+{
+    struct event * event;
+    evutil_socket_t connfd;
+};
+struct Ev_Connfd_Struct ev_confd_struct[1024];
+//初始化结构体数组
+void Init_Ev_Connfd_Struct(struct Ev_Connfd_Struct * ev_confd_struct, int length)
+{
+    int i=0;
+    for(i=0;i<length;++i)
+    {
+        ev_confd_struct[i].connfd = -1;
+        ev_confd_struct[i].event = NULL;
+    }
+    return;
+}
+//查找结构体数组一个空闲位置
+int find_index(struct Ev_Connfd_Struct * ev_confd_struct, int length)
+{
+    int i=0;
+    for(i=0;i<length;++i)
+    {
+        if(ev_confd_struct[i].connfd==-1)
+            return i;
+    }
+    return -1;
+}
+int find_connfd(struct Ev_Connfd_Struct * ev_confd_struct, int length, int connfd)
+{
+    int i=0;
+    for(i=0;i<length;++i)
+    {
+        ev_confd_struct[i].connfd == connfd;
+        return i;
+    }
+}
+
+
+
+//connfd事件对应的回调函数
+void readcb(evutil_socket_t fd, short events, void *arg)
+{
+    int i = find_connfd(ev_confd_struct, 1024, fd);
+    struct event * _ev = ev_confd_struct[i].event;
+    //处理客户端数据发来的事件
+    int n;
+    char buf[1024];
+    memset(buf, 0x00, sizeof(buf));
+    n = read(fd, buf, sizeof(buf));
+    if(n<=1)
+    {
+        printf("客户端关闭连接\n");
+        close(fd);
+        //将通信文件描述符对应的事件从base地基上删除
+        event_del(_ev);
+        ev_confd_struct[i].connfd = -1;
+        ev_confd_struct[i].event = NULL;
+    }
+    else
+    {
+        printf("%s", buf);
+        int k;
+        for(k=0;k<n;++k)
+        {
+            buf[k]  = toupper(buf[k]);
+        }
+        write(fd, buf, n);
+    }
+}
+
+//listenfd事件对应的回调函数
+//typedef void (*event_callback_fn)(evutil_socket_t fd, short events, void *arg);
+void conncb(evutil_socket_t fd, short events, void *arg)
+{
+    //客户端信息相关参数
+    struct sockaddr_in cliaddr;
+    socklen_t len = sizeof(cliaddr);
+    char sIP[16];
+
+    struct event_base *base = (struct event_base *) arg;
+    //处理有客户端连接请求到来的事件
+    int connfd = accept(fd, (struct sockaddr *) &cliaddr, &len);
+    if (connfd > 0)
+    {
+        int i = find_index(ev_confd_struct,1024);
+        if(i==-1)
+        {
+            printf("用户连接已满，请再次尝试\n");
+            return;
+        }
+        ev_confd_struct[i].connfd=connfd;
+
+        printf("已成功连接一个客户端,client:IP = [%s], port=[%d]\n", inet_ntop(AF_INET, &cliaddr.sin_addr.s_addr, sIP,sizeof(sIP)), ntohs(cliaddr.sin_port));
+
+        //创建通信文件描述符对应的事件并设置回调函数为readcb
+        struct event * ev_connfd = event_new(base, connfd, EV_READ | EV_PERSIST, readcb, NULL);
+
+        //新连接上地基
+        event_add(ev_connfd, NULL);
+        ev_confd_struct[i].event = ev_connfd;
+    }
+    else
+    {
+        printf("accept error\n");
+    }
+}
+
+
+int main()
+{
+    //初始化结构体数组
+    Init_Ev_Connfd_Struct(ev_confd_struct,1024);
+
+    int listenfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    //允许端口复用
+    int opt = 1;
+    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
+    //绑定
+    struct sockaddr_in servaddr, clivaddr;
+    bzero(&servaddr, sizeof(servaddr));
+    servaddr.sin_family = AF_INET;
+    servaddr.sin_port = htons(8888);
+    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bind(listenfd, (struct sockaddr*)&servaddr, sizeof(servaddr));
+
+    //监听
+    listen(listenfd, 128);
+    printf("listening\n");
+
+    //构建地基
+    //struct event_base *event_base_new(void)
+    struct event_base * base  = event_base_new();
+    if(base==NULL)
+    {
+        printf("event_base_new error\n");
+        return -1;
+    }
+    //创建listenfd事件
+    //struct event *event_new(struct event_base *base, evutil_socket_t fd,
+    //                      short events, event_callback_fn cb, void *arg);
+    struct event * ev = event_new(base, listenfd, EV_READ | EV_PERSIST, conncb, base);//conncb为回调函数
+    if(ev==NULL)
+    {
+        printf("event_new error\n");
+        return -1;
+    }
+    //将listenfd事件上event_base地基
+    event_add(ev, NULL);
+
+    //进入事件循环
+    event_base_dispatch(base);
+
+    //释放资源
+    event_base_free(base);
+    event_free(ev);
+
+    close(listenfd);
+    return 0;
+}
+```
+
+## 8. 自带buffer的事件-bufferevent
+bufferevent实际上也是一个event, 只不过比普通的event高级一些, 它的内部有两个缓冲区, 以及一个文件描述符（网络套接字）。所以一共有四个缓冲区。 还有就是libevent事件驱动的核心回调函数, 那么四个缓冲区以及触发回调的关系如下：
+![在这里插入图片描述](https://img-blog.csdnimg.cn/85bd004769ec4932964fd4a9ce2967dd.png)
+从图中可以得知, 一个bufferevent对应两个缓冲区, 三个回调函数, 分别是写回调, 读回调和事件回调。<font color='red'> **我们在对数据进行读写操作时是写入bufferevent的缓冲区，bufferevent的缓冲区会自动帮我们写入sockfd的缓冲区中。** </font>
+
+bufferevent有三个回调函数：
+- 读回调 – 当bufferevent自动将底层读缓冲区的数据读到自身的读缓冲区时触发读事件回调.需要注意的是: 数据由内核到bufferevent的过程不是用户程序执行的, 是由bufferevent内部操作的.
+- 写回调 – 当用户程序将数据写到bufferevent的写缓冲区之后, bufferevent会自动将数据写到内核的写缓冲区，此时触发写回调函数，最终有内核程序将数据发送出去。
+- 事件回调 – 当bufferevent绑定的socket连接, 断开或者异常的时候触发事件回调.
+
+### 8.1 bufferevent_socket_new----创建bufferevent事件（将每一个connfd与一个bufferevent缓冲区绑定）
+struct bufferevent *bufferevent_socket_new(struct event_base *base, evutil_socket_t fd, int options);
+- 函数说明: bufferevent_socket_new 对已经存在connfd创建bufferevent事件, 可用于后面讲到的连接监听器的回调函数中.即：**将connfd与bufferevent缓冲区绑定**。
+- 参数说明：
+	- base :对应根节点
+	- fd   :文件描述符
+	- options : bufferevent的选项
+		- BEV_OPT_CLOSE_ON_FREE  -- 释放bufferevent自动关闭底层接口(当bufferevent被释放以后, 文件描述符也随之被close)    
+		- BEV_OPT_THREADSAFE  -- 使bufferevent能够在多线程下是安全的
+
+### 8.2 bufferevent_free----释放bufferevent
+void bufferevent_free(struct bufferevent *bufev);
+
+### 8.3 bufferevent_socket_connect----与通信的socket绑定（客户端用）
+
+int bufferevent_socket_connect(struct bufferevent *bev, struct sockaddr *serv, int socklen);
+- 函数说明: 该函数封装了底层的socket与connect接口, 通过调用此函数, **可以将bufferevent事件与通信的socket进行绑定**。
+- 函数参数：
+	- bev – 需要提前初始化的bufferevent事件
+	- serv – 对端(一般指服务端)的ip地址, 端口, 协议的结构指针
+	-	socklen – 描述serv的长度
+
+说明: 调用此函数以后, 通信的socket与bufferevent缓冲区做了绑定, 后面调用了bufferevent_setcb函数以后, 会对bufferevent缓冲区的读写操作的事件设置回调函数, **当往缓冲区中写数据的时候会触发写回调函数, 当数据从socket的内核缓冲区读到bufferevent读缓冲区中的时候会触发读回调函数.**
+
+
+
+### 8.4 bufferevent_setcb----设置三个回调函数
+
+```cpp
+void bufferevent_setcb(struct bufferevent *bufev,
+    			bufferevent_data_cb readcb, //读回调
+    			bufferevent_data_cb writecb,//写回调
+				bufferevent_event_cb eventcb, //事件回调
+				void *cbarg);
+```
+- 函数说明: bufferevent_setcb用于设置bufferevent的回调函数, readcb, writecb, 		eventcb分别对应了读回调, 写回调, 事件回调, cbarg代表回调函数的参数。
+
+回调函数的原型：
+- 读写回调：typedef void (*bufferevent_data_cb)(struct bufferevent *bev, void *ctx);
+- 事件回调：typedef void (*bufferevent_event_cb)(struct bufferevent *bev, short what, void *ctx);
+	- What 代表 对应的事件
+		- BEV_EVENT_EOF--遇到文件结束指示
+		- BEV_EVENT_ERROR--发生错误
+		- BEV_EVENT_TIMEOUT--发生超时
+		- BEV_EVENT_CONNECTED--请求的过程中连接已经完成
+
+### 8.5 bufferevent_write/read----读写bufferevent缓冲区
+写缓冲区：
+- int bufferevent_write(struct bufferevent *bufev, const void *data, size_t size);
+- 函数说明：bufferevent_write是将data的数据写到bufferevent的写缓冲区。触发写事件回调函数
+
+读缓冲区：
+- size_t bufferevent_read(struct bufferevent *bufev, void *data, size_t size);
+- bufferevent_read 是将bufferevent的读缓冲区数据读到data中, 同时将读到的数据从bufferevent的读缓冲清除。触发读事件回调函数
+
+bufferevent_enable与bufferevent_disable是设置事件是否生效, 如果设置为disable, 事件回调将不会被触发：
+- int bufferevent_enable(struct bufferevent *bufev, short event);
+-  int bufferevent_disable(struct bufferevent *bufev, short event);
+
+
+## 8. 链接监听器----evconnlistener
+<event2/listener.h>
+
+**链接监听器封装了底层的socket通信相关函数, 比如socket, bind, listen, accept这几个函数。** 链接监听器创建后实际上相当于调用了socket, bind, listen, 此时等待新的客户端连接到来, 如果有新的客户端连接, 那么内部先进行调用accept处理, 然后调用用户指定的回调函数。一句话总结：就是封装了socket bind listen accept函数的方法。
+### 8.1 evconnlistener_new_bind----初始化链接监听器
+```cpp
+struct evconnlistener *evconnlistener_new_bind(
+struct event_base *base, evconnlistener_cb cb, 
+void *ptr, unsigned flags, int backlog,
+const struct sockaddr *sa, int socklen);
+```
+- **函数说明:** evconnlistener_new_bind是在当前没有套接字的情况下对链接监听器进行初始化。
+- **参数说明**：
+	- base：地基
+	- cb：自己设定的回调函数。cb是accept返回后的**回调函数**, 但是注意这个回调函数触发的**时机**, 链接器已经处理好新连接了, 并将与新连接通信的描述符交给回调函数。
+	- ptr：回调函数的参数
+	- flags：
+		- LEV_OPT_LEAVE_SOCKETS_BLOCKING   文件描述符为阻塞的
+		- **LEV_OPT_CLOSE_ON_FREE            关闭时自动释放**
+		- LEV_OPT_REUSEABLE                端口复用
+		- LEV_OPT_THREADSAFE               分配锁, 线程安全
+	- backlog： listen函数的第二个参数，设置为-1让监听起自动设置就行
+	- 最后两个参数就是bind函数的参数
+
+evconnlistener的回调函数（**即可以看作调用完accept，accept返回以后所调用的回调函数**）：
+typedef void (*evconnlistener_cb)(struct evconnlistener *evl, evutil_socket_t fd, struct sockaddr *cliaddr, int socklen, void *ptr);
+
+注意：**回调函数fd参数是与客户端通信的描述符**, 并非是等待连接的监听的那个描述符, 所以cliaddr对应的也是新连接的对端地址信息, 已经是accept处理好的。
+
+void evconnlistener_free(struct evconnlistener *lev);
+函数说明: 释放链接监听器
+
+int evconnlistener_enable(struct evconnlistener *lev);
+函数说明: 使链接监听器生效
+
+int evconnlistener_disable(struct evconnlistener *lev);
+函数说明: 使链接监听器失效
