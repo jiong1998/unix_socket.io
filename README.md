@@ -2112,11 +2112,11 @@ bufferevent_enable与bufferevent_disable是设置事件是否生效, 如果设�
 -  int bufferevent_disable(struct bufferevent *bufev, short event);
 
 
-## 8. 链接监听器----evconnlistener
+## 9. 链接监听器----evconnlistener
 <event2/listener.h>
 
 **链接监听器封装了底层的socket通信相关函数, 比如socket, bind, listen, accept这几个函数。** 链接监听器创建后实际上相当于调用了socket, bind, listen, 此时等待新的客户端连接到来, 如果有新的客户端连接, 那么内部先进行调用accept处理, 然后调用用户指定的回调函数。一句话总结：就是封装了socket bind listen accept函数的方法。
-### 8.1 evconnlistener_new_bind----初始化链接监听器
+### 9.1 evconnlistener_new_bind----初始化链接监听器
 ```cpp
 struct evconnlistener *evconnlistener_new_bind(
 struct event_base *base, evconnlistener_cb cb, 
@@ -2149,3 +2149,131 @@ int evconnlistener_enable(struct evconnlistener *lev);
 
 int evconnlistener_disable(struct evconnlistener *lev);
 函数说明: 使链接监听器失效
+
+## 10基于libevent的bufferevent实现tcp服务器代码实现
+```cpp
+//第六章：基于bufferevent实现tcp服务器
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ctype.h>//大小写转换
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
+#include <event2/listener.h>
+#include <event2/util.h>
+#include <event2/event.h>
+
+static const char MESSAGE[] = "Hello, World!\n";
+
+static const int PORT = 8888;
+
+static void listener_cb(struct evconnlistener *, evutil_socket_t,
+                        struct sockaddr *, int socklen, void *);
+//static void conn_eventcb(struct bufferevent *, short, void *);
+static void conn_readcb(struct bufferevent *, void *);
+
+int main(int argc, char **argv)
+{
+    printf("test\n");
+    struct event_base *base;//构建地基
+    struct evconnlistener *listener;//构建链接监听器
+    struct sockaddr_in sin;
+
+    //创建地基---相当于epoll的树根(epoll_create)
+    base = event_base_new();
+    if (!base) {
+        fprintf(stderr, "Could not initialize libevent!\n");
+        return 1;
+    }
+
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(PORT);
+    //创建链接监听器--socket-bind-listen-accept
+    //listener_cb 回调函数，即accept返回以后所调用的回调函数
+    printf("开始设置evconnlistener_new_bind\n");
+    listener = evconnlistener_new_bind(base, listener_cb, (void *)base,
+                                       LEV_OPT_REUSEABLE|LEV_OPT_CLOSE_ON_FREE, -1,
+                                       (struct sockaddr*)&sin,
+                                       sizeof(sin));
+
+    printf("evconnlistener_new_bind设置成功\n");
+    if (!listener) {
+        fprintf(stderr, "Could not create a listener!\n");
+        return 1;
+    }
+
+    //进入循环
+    event_base_dispatch(base);
+    //释放资源
+    evconnlistener_free(listener);
+    event_base_free(base);
+
+    printf("done\n");
+    return 0;
+}
+
+//调用accept返回后的回调函数:
+//fd: 通信文件描述符
+//sa和socklen: 客户端IP地址信息
+//user_data: 参数
+static void listener_cb(struct evconnlistener *listener, evutil_socket_t connfd,
+            struct sockaddr *sa, int socklen, void * arg)
+{
+    struct sockaddr_in cliaddr = *(struct sockaddr_in *)sa;
+    char sIP[16];
+    printf("已成功连接一个客户端,client:IP = [%s], port=[%d]\n", inet_ntop(AF_INET, &cliaddr.sin_addr.s_addr, sIP,sizeof(sIP)), ntohs(cliaddr.sin_port));
+    //接收base
+    struct event_base *base = arg;
+    //创建一个bufferevent的事件绑定新连接用户的文件描述符connfd
+    struct bufferevent *bev;
+
+    //创建bufferevent缓冲区
+    //BEV_OPT_CLOSE_ON_FREE: bufferevent释放的时候自动关闭通信文件描述符
+    bev = bufferevent_socket_new(base, connfd, BEV_OPT_CLOSE_ON_FREE);
+    if (!bev)
+    {
+        fprintf(stderr, "Error constructing bufferevent!");
+        event_base_loopbreak(base);
+        return;
+    }
+    printf("connfd与bufferevent绑定成功\n");
+    //设置回调函数: 读回调, 写回调和事件回调
+    bufferevent_setcb(bev, conn_readcb, NULL, NULL, &connfd);
+    printf("读回调函数设置成功\n");
+    //添加监控事件
+    bufferevent_enable(bev, EV_READ);
+}
+
+//当bufferevent缓冲区有数据时触发的回调函数
+static void conn_readcb(struct bufferevent *bev, void * arg)
+{
+    //获取参数connfd
+    int connfd = *(int *)arg;
+    char buf[1024];
+    int n;
+    n = bufferevent_read(bev, buf, sizeof(buf));
+    if(n<=1)
+    {
+        printf("客户端关闭!\n");
+        close(connfd);//调用事件异常回调函数
+        bufferevent_free(bev);
+        printf("bufferevent_free成功!\n");
+        return;
+        printf("未返回！\n");
+    }
+    printf("%s", buf);
+    int i=0;
+    for(i=0; i<n; i++)
+    {
+        buf[i] = toupper(buf[i]);
+    }
+    bufferevent_write(bev, buf, n);//写bufferevent缓冲区会触发写事件回调
+}
+```
