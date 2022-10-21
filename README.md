@@ -1,5 +1,6 @@
-
 # Unix网络编程
+本文内容较长，包含的知识点很多(多线程/多进程开发服务器，select、epoll、poll、线程池、UDP服务器开发、libevent库的使用等)，建议使用Ctrl+f 来查找学习。最后一章是web服务器开发的实例，建议阅读学习。
+
 在unix网络编程笔记中，大部分计算机网络的知识将被略过，默认大家有相应的前置基础。
 
 # 第一章 Socket api编程
@@ -362,6 +363,7 @@ int main()
 
 
 # 第二章 高并发服务器开发(多进程、多线程)
+linux下可以使用命令 nc 127.1 8888来测试服务器的开发
 ## 1. 包裹（封装）函数
 像read、wirte、socket相关函数可以通过封装成Read、Write、Socket来**避免代码的冗余**(前面服务器代码案例已经体现)。
 
@@ -1315,6 +1317,10 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 - 注意：epoll_wait返回的数组中事件节点的值不会修改，是当时上epoll树的时候设置的值。
 
 ### 2.4 利用epoll开发高并发服务器
+开发流程如图所示：
+![](https://img-blog.csdnimg.cn/6e65fd111cca427db622aeee48b68b1b.png)
+
+
 需求：利用单进程和epoll完成多个客户端的连接。注意：在用epoll开发服务器中，主要用epoll干两件事：
 - 监听客户端的connect
 - 监听客户端的发送的数据  
@@ -1455,8 +1461,8 @@ epoll_ctl(epfd, EPOLL_CTL_ADD, connfd, &ev);
 - 要求一：**必须要一次读完/写入所有的数据**。因为ET模式只会通知一次，下一次读取只能是缓冲区接收到了新的数据。
 - 要求二：**必须设为非阻塞模式**。循环读取的时候，如果缓冲区没有数据或者低于水位线，recv/read就会阻塞等待读事件就绪，这会影响到epoll模型中其他文件描述符的操作。
 
-具体代码案例移步至：https://github.com/jiong1998/unix_socket.io/issues/8
-
+具体代码案例移步至：
+https://github.com/jiong1998/unix_socket.io/issues/8
 ## 3 epoll反应堆
 
 ### 3.1 epoll反应堆的核心思想
@@ -2089,6 +2095,8 @@ void bufferevent_setcb(struct bufferevent *bufev,
 ```
 - 函数说明: bufferevent_setcb用于设置bufferevent的回调函数, readcb, writecb, 		eventcb分别对应了读回调, 写回调, 事件回调, cbarg代表回调函数的参数。
 
+注意：当通信描述符connfd的读缓冲区写入数据时，bufferevent会自动将其读入自己的读缓冲区，读完后就调用读事件回调。
+
 回调函数的原型：
 - 读写回调：typedef void (*bufferevent_data_cb)(struct bufferevent *bev, void *ctx);
 - 事件回调：typedef void (*bufferevent_event_cb)(struct bufferevent *bev, short what, void *ctx);
@@ -2169,7 +2177,6 @@ int evconnlistener_disable(struct evconnlistener *lev);
 #include <event2/util.h>
 #include <event2/event.h>
 
-static const char MESSAGE[] = "Hello, World!\n";
 
 static const int PORT = 8888;
 
@@ -2248,7 +2255,7 @@ static void listener_cb(struct evconnlistener *listener, evutil_socket_t connfd,
     bufferevent_setcb(bev, conn_readcb, NULL, NULL, &connfd);
     printf("读回调函数设置成功\n");
     //添加监控事件
-    bufferevent_enable(bev, EV_READ);
+    bufferevent_enable(bev, EV_READ | EV_PERSIST);
 }
 
 //当bufferevent缓冲区有数据时触发的回调函数
@@ -2276,4 +2283,150 @@ static void conn_readcb(struct bufferevent *bev, void * arg)
     }
     bufferevent_write(bev, buf, n);//写bufferevent缓冲区会触发写事件回调
 }
+```
+
+# 第八章 web服务器开发
+需求：打开浏览器输入网址+端口号+请求文件，服务器给浏览器返回相应的文件。
+
+所运用到的知识点
+1. 开发网络服务器：
+	- 多路IO复用技术：epoll、select、poll
+	- 多进程/多线程
+	- 第三方库：libevent库
+2. 熟悉http协议
+	- 请求协议
+	- 应答协议
+3. 使用的协议有http+TCP协议
+	- TCP协议：建立连接的三次握手，连接建立完成后接着是数据传输
+	- web服务器：首先解析浏览器发来的请求数据，得到请求的文件名；若文件存在，则发送文件内容给浏览器；若文件不存在，则发送一个错误页给浏览器；
+
+## 1. html
+Html的组成可以分为如下部分:
+1.	<!doctype html> 声明文档类型,可以不写
+2.	\<html> 开始 和\</html> 结束,属于html的根标签
+3.	\<head>\</head> 头部标签,头部标签内一般有 \<title>\</title>
+4.	\<body>\</body> 主体标签,一般用于显示内容
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/9e6d8bc3fe51437dac512994e9b0c387.png)
+### 1.1 html图片标签
+图片标签使用<img>,内部需要设置若干属性,可以不必写结束标签
+
+属性:
+1.	src=”3.gif” 图片来源,必写
+2.	alt=”小岳岳” 图片不显示时,显示的内容
+3.	title=”我的天呐” 鼠标移动到图片上时显示的文字
+4.	width=”600” 图片显示的宽度
+5.	height=”400” 图片显示的高度
+
+\<img src="3.gif" alt="小岳岳" title="我的天呐！" width="300" height="200" />  
+
+### 1.2 超链接标签
+超链接标签使用\<a>,同样需要设置属性表明要链接到哪里.
+属性:
+1.	href=”http://www.itcast.cn”,前往地址,必填,注意要写http://
+2.	title=”前往A” 鼠标移动到链接上时显示的文字
+3.	target=”_self”或者”_blank”,_self是默认值,在自身页面打开,_blank是新开页面前往连接地址 
+示例:
+
+\<a href=”http://www.baidu.com” title=”前往百度” target=”_self” >去百度</a>
+<a href=”http://www.baidu.com” title=”前往百度” target=”_self” >去百度</a>
+
+##  2.http
+
+### 2.1 http请求报文
+主要有四个部分
+1. **请求行：**
+	- 请求类型（方法字段）
+		- GET
+		- POST
+		- HEAD
+	- URL
+	- http版本
+2.  **首部行（请求头）:** 说明服务器使用的附加信息,都是键值对,比如表明浏览器类型
+3.  **空行:** 不能省略-而且是\r\n,包括请求行和首部行都是以\r\n结尾
+4. **实体体（请求信息）:** 表明请求的特定数据内容。例如：用户向搜索引擎搜关键字时，若使用的请求类型是POST，则将搜索内容写入实体体中。
+
+http请求报文如下图所示
+![在这里插入图片描述](https://img-blog.csdnimg.cn/8518ca65d0a744c8a7ae7637eaca32cd.png)
+
+注意：GET和POST的区别：
+- 用户向搜索引擎搜关键字时，若使用的是**POST**的请求类型，会将搜索的内容写入实体体中，而不写入URL中
+- 但是如果你使用的请求类型**GET**，则会把请求的URL中包含搜索的内容，不填入实体体中。
+
+
+### 2.2 http响应报文
+
+主要有四个部分
+1. **状态行：**
+	- http版本号
+	- 状态码：200、404等
+	- 状态信息
+2.  **首部行:**  说明客户端要使用的一些附加信息,也是键值对
+3.  **空行:** \r\n 同样不能省略
+4. **实体体:** 服务器返回给客户端的文本信息
+
+http响应报文如下图所示
+![在这里插入图片描述](https://img-blog.csdnimg.cn/911352d40b4841d3bd3b28106efb64be.png)
+
+### 2.3 http常见文件类型分类
+http与浏览器交互时,为使浏览器能够识别文件信息,所以需要传递文件类型,这也是**响应报文**必填项,常见的类型如下:
+- 普通文件:  text/plain; charset=utf-8
+- *.html:    text/html; charset=utf-8
+- *.jpg:     image/jpeg
+- *.gif:     image/gif
+- *.png:     image/png
+- *.wav:     audio/wav
+- *.avi:     video/x-msvideo
+- *.mov:     video/quicktime
+- *.mp3:     audio/mpeg
+编码集：
+- charset=iso-8859-1    西欧的编码，说明网站采用的编码是英文；
+- charset=gb2312         说明网站采用的编码是简体中文；
+- charset=utf-8              代表世界通用的语言编码；可以用到中文、韩文、日文等世界上所有语言编码上
+- charset=euc-kr          说明网站采用的编码是韩文；
+- charset=big5             说明网站采用的编码是繁体中文；
+
+## 3. web服务器开发需求和流程
+### 3.1 开发需求
+我们要开发web服务器已经明确要使用http协议传送html文件,那么我们如何搭建我们的服务器呢?注意http只是应用层协议,我们仍然需要选择一个传输层的协议来完成我们的传输数据工作,所以开发协议选择是TCP+HTTP,也就是说服务器搭建浏览依照TCP,对数据进行解析和响应工作遵循HTTP的原则.
+
+这样我们的思路很清晰,编写一个TCP并发服务器,只不过收发消息的格式采用的是HTTP协议,如下图:
+![在这里插入图片描述](https://img-blog.csdnimg.cn/9bac1dfb2aed40c5b90d6d7641ecf14e.png)
+为了支持并发服务器,我们可以有多个选择,比如多进程服务器,多线程服务器,select,poll,epoll等多路IO工具都可以,甚至如果觉得libevent非常熟练的话,也可以使用libevent进行开发.
+
+### 3.2 流程分析
+由于我们知道epoll在大量并发少量活跃的情况下效率很高,所以本文以epoll为例,介绍epoll开发的主体流程。
+
+流程主要分为两个部分：
+第一个部分是通用的epoll的服务器开发部分（之前已经学过）。第二个部分是**处理客户端请求**。
+
+通用的epoll的服务器开发部分流程如下图所示：
+![在这里插入图片描述](https://img-blog.csdnimg.cn/800a38ac9bcf4eaf89128ec4fd8d4cba.png)
+epoll的具体流程就不作介绍了，之前已经做过相应的服务器开发了。
+
+处理客户端请求部分流程如下图所示：
+![在这里插入图片描述](https://img-blog.csdnimg.cn/f6a2c3c2d2374a159f0c4ba5d9467fae.png)
+处理客户端请求的流程：
+```cpp
+ int http_request(int cfd)
+ {
+ 	//读取请求行
+	Readline();
+	//分析请求行，得到要请求的资源文件名file
+		如：GET /hanzi.c /HTTP1.1
+	//循环读完剩余的内核缓冲区的数据,不然数据还会留在缓冲区
+	while((n = Readline())>0)；
+	//判断文件是否存在
+	stat()；
+	
+	1文件不存在
+		返回错误页
+			组织应答信息：http响应格式消息+错误页正文内容
+	2文件存在
+		判断文件类型：
+			2.1普通文件
+				组织应答信息：http响应格式消息＋消息正文
+			2.2 目录文件
+				组织应答消息：http响应格式消息thtml格式文件
+ }
 ```
